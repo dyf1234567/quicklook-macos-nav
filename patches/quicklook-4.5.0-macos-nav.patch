@@ -1,0 +1,268 @@
+warning: in the working copy of 'QuickLook/QuickLook.csproj', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'Directory.Build.props', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'GitVersion.cs', LF will be replaced by CRLF the next time Git touches it
+diff --git a/Directory.Build.props b/Directory.Build.props
+new file mode 100644
+index 0000000..13d2134
+--- /dev/null
++++ b/Directory.Build.props
+@@ -0,0 +1,18 @@
++<Project>
++  <!--
++    Local build helper:
++    1) Provides .NET Framework reference assemblies for building net4xx targets
++       without installing the Developer Pack / Visual Studio.
++    2) Pins C# language version so generated XAML temporary projects still
++       compile `?.=` (null-conditional assignment) etc.
++    3) Enables preserialized resources (needed by WPF/net462 builds).
++  -->
++  <PropertyGroup>
++    <LangVersion>preview</LangVersion>
++    <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
++  </PropertyGroup>
++  <ItemGroup>
++    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
++    <PackageReference Include="System.Resources.Extensions" Version="7.0.0" PrivateAssets="all" />
++  </ItemGroup>
++</Project>
+diff --git a/GitVersion.cs b/GitVersion.cs
+new file mode 100644
+index 0000000..37dd581
+--- /dev/null
++++ b/GitVersion.cs
+@@ -0,0 +1,6 @@
++using System.Reflection;
++
++// GitVersion generated version attributes (recreated manually for local build)
++[assembly: AssemblyVersion("4.5.0.0")]
++[assembly: AssemblyFileVersion("4.5.0.0")]
++[assembly: AssemblyInformationalVersion("4.5.0+modified")]
+diff --git a/QuickLook/KeystrokeDispatcher.cs b/QuickLook/KeystrokeDispatcher.cs
+index e9db56c..ae6557a 100644
+--- a/QuickLook/KeystrokeDispatcher.cs
++++ b/QuickLook/KeystrokeDispatcher.cs
+@@ -20,6 +20,7 @@ using QuickLook.Helpers;
+ using System;
+ using System.Collections.Generic;
+ using System.Diagnostics;
++using System.Runtime.InteropServices;
+ using System.Windows.Forms;
+ 
+ namespace QuickLook;
+@@ -33,6 +34,7 @@ internal class KeystrokeDispatcher : IDisposable
+     private GlobalKeyboardHook _hook;
+     private bool _isPreviewRequest;
+     private bool _spaceIsDown;
++    private bool _arrowKeySuppressed;
+     private long _spaceHoldTick;
+     private long _lastInvalidKeyPressTick;
+ 
+@@ -85,6 +87,30 @@ internal class KeystrokeDispatcher : IDisposable
+             return;
+         _lastInvalidKeyPressTick = 0L;
+ 
++        // macOS-like mouse-hover capture: when the mouse cursor is over the preview
++        // window while some non-file-manager app (e.g. browser) has focus, arrow keys
++        // switch images and are swallowed so the foreground app does not receive them.
++        if (isKeyDown && IsArrowKey(e.KeyCode))
++        {
++            var fgIsFileManager = NativeMethods.QuickLook.GetFocusedWindowType() !=
++                                  NativeMethods.QuickLook.FocusedWindowType.Invalid;
++            var fgIsSelf = WindowHelper.IsForegroundWindowBelongToSelf();
++            if (IsMouseOverOwnWindow() && !fgIsFileManager && !fgIsSelf)
++            {
++                _arrowKeySuppressed = true;
++                e.Handled = true;
++                SendSwitchWithDirection(e.KeyCode);
++                return;
++            }
++        }
++        else if (!isKeyDown && _arrowKeySuppressed)
++        {
++            // swallow the matching key-up of a previously captured arrow key
++            _arrowKeySuppressed = false;
++            e.Handled = true;
++            return;
++        }
++
+         // skip if user is holding Space (don't skip other valid keys)
+         if (isKeyDown && e.KeyCode == Keys.Space)
+         {
+@@ -100,6 +126,7 @@ internal class KeystrokeDispatcher : IDisposable
+             _isPreviewRequest = NativeMethods.QuickLook.GetFocusedWindowType() !=
+                                 NativeMethods.QuickLook.FocusedWindowType.Invalid;
+             _isPreviewRequest |= WindowHelper.IsForegroundWindowBelongToSelf();
++            _isPreviewRequest |= IsMouseOverOwnWindow();
+         } // else (when isKeyDown is false), _isPreviewRequest retain its current state
+ 
+         // call InvokeRoutine only when user pressed a key in a valid window, or
+@@ -146,10 +173,15 @@ internal class KeystrokeDispatcher : IDisposable
+             switch (key)
+             {
+                 case Keys.Up:
+-                case Keys.Down:
+                 case Keys.Left:
++                    // direction = previous (macOS-like navigation)
++                    PipeServerManager.SendMessage(PipeMessages.Switch, null, new[] { "-1" });
++                    break;
++
++                case Keys.Down:
+                 case Keys.Right:
+-                    PipeServerManager.SendMessage(PipeMessages.Switch);
++                    // direction = next (macOS-like navigation)
++                    PipeServerManager.SendMessage(PipeMessages.Switch, null, new[] { "1" });
+                     break;
+ 
+                 case Keys.Escape:
+@@ -171,6 +203,46 @@ internal class KeystrokeDispatcher : IDisposable
+         _hook.KeyUp += upHandler;
+     }
+ 
++    private static bool IsArrowKey(Keys key)
++    {
++        return key is Keys.Up or Keys.Down or Keys.Left or Keys.Right;
++    }
++
++    private static void SendSwitchWithDirection(Keys key)
++    {
++        var direction = key is Keys.Left or Keys.Up ? "-1" : "1";
++        PipeServerManager.SendMessage(PipeMessages.Switch, null, new[] { direction });
++    }
++
++    private static bool IsMouseOverOwnWindow()
++    {
++        if (!GetCursorPos(out var pt))
++            return false;
++
++        var hwnd = WindowFromPoint(pt);
++        if (hwnd == IntPtr.Zero)
++            return false;
++
++        GetWindowThreadProcessId(hwnd, out var pid);
++        return pid == (uint)Process.GetCurrentProcess().Id;
++    }
++
++    [DllImport("user32.dll")]
++    private static extern bool GetCursorPos(out POINT lpPoint);
++
++    [DllImport("user32.dll")]
++    private static extern IntPtr WindowFromPoint(POINT point);
++
++    [DllImport("user32.dll")]
++    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
++
++    [StructLayout(LayoutKind.Sequential)]
++    private struct POINT
++    {
++        public int X;
++        public int Y;
++    }
++
+     internal static KeystrokeDispatcher GetInstance()
+     {
+         return _instance ??= new KeystrokeDispatcher();
+diff --git a/QuickLook/PipeServerManager.cs b/QuickLook/PipeServerManager.cs
+index 92a3b35..803a3e6 100644
+--- a/QuickLook/PipeServerManager.cs
++++ b/QuickLook/PipeServerManager.cs
+@@ -140,7 +140,8 @@ public class PipeServerManager : IDisposable
+ 
+             case PipeMessages.Switch:
+                 _lastOperation = Application.Current.Dispatcher.BeginInvoke(
+-                    new Action(() => ViewWindowManager.GetInstance().SwitchPreview(path)),
++                    new Action(() => ViewWindowManager.GetInstance().SwitchPreview(path,
++                        int.TryParse(option, out var direction) ? direction : 0)),
+                     DispatcherPriority.ApplicationIdle);
+                 return false;
+ 
+diff --git a/QuickLook/QuickLook.csproj b/QuickLook/QuickLook.csproj
+index 3ae1f2e..dd3fe36 100644
+--- a/QuickLook/QuickLook.csproj
++++ b/QuickLook/QuickLook.csproj
+@@ -10,7 +10,7 @@
+         <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+         <UseWPF>true</UseWPF>
+         <UseWindowsForms>true</UseWindowsForms>
+-        <LangVersion>latest</LangVersion>
++        <LangVersion>preview</LangVersion>
+         <Platforms>AnyCPU;x64</Platforms>
+         <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+         <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+diff --git a/QuickLook/ViewWindowManager.cs b/QuickLook/ViewWindowManager.cs
+index 56b6c5e..a00772b 100644
+--- a/QuickLook/ViewWindowManager.cs
++++ b/QuickLook/ViewWindowManager.cs
+@@ -21,6 +21,7 @@ using QuickLook.Helpers;
+ using System;
+ using System.Diagnostics;
+ using System.IO;
++using System.Linq;
+ using System.Runtime.ExceptionServices;
+ 
+ namespace QuickLook;
+@@ -106,20 +107,64 @@ public class ViewWindowManager : IDisposable
+         InitNewViewerWindow();
+     }
+ 
+-    public void SwitchPreview(string path = null)
++    public void SwitchPreview(string path = null, int direction = 0)
+     {
+         if (!_viewerWindow.IsVisible)
+             return;
+ 
++        // Normal path: the foreground window is Explorer/Desktop, read the current selection.
+         if (string.IsNullOrEmpty(path))
+             path = NativeMethods.QuickLook.GetCurrentSelection();
+ 
++        // macOS-like fallback: when the focus is on the preview window itself
++        // (no Explorer selection is available), navigate within the current folder.
++        if (string.IsNullOrEmpty(path) && direction != 0 && !string.IsNullOrEmpty(_invokedPath))
++            path = GetAdjacentFile(_invokedPath, direction);
++
+         if (string.IsNullOrEmpty(path))
+             return;
+ 
+         InvokePreview(path);
+     }
+ 
++    private string GetAdjacentFile(string currentPath, int direction)
++    {
++        try
++        {
++            var dir = Path.GetDirectoryName(currentPath);
++            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
++                return null;
++
++            var files = Directory.GetFiles(dir)
++                .Where(f =>
++                {
++                    try
++                    {
++                        var attrs = File.GetAttributes(f);
++                        return (attrs & (FileAttributes.Hidden | FileAttributes.System)) == 0;
++                    }
++                    catch
++                    {
++                        return false;
++                    }
++                })
++                .OrderBy(f => f, StringComparer.CurrentCultureIgnoreCase)
++                .ToList();
++
++            var index = files.IndexOf(currentPath);
++            if (index < 0)
++                return null;
++
++            var next = index + direction;
++            return next >= 0 && next < files.Count ? files[next] : null;
++        }
++        catch (Exception e)
++        {
++            Debug.WriteLine(e);
++            return null;
++        }
++    }
++
+     public void InvokePreviewWithOption(string path = null, string options = null)
+     {
+         InvokePreview(path);
