@@ -1,6 +1,3 @@
-warning: in the working copy of 'QuickLook/QuickLook.csproj', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'Directory.Build.props', LF will be replaced by CRLF the next time Git touches it
-warning: in the working copy of 'GitVersion.cs', LF will be replaced by CRLF the next time Git touches it
 diff --git a/Directory.Build.props b/Directory.Build.props
 new file mode 100644
 index 0000000..13d2134
@@ -189,18 +186,21 @@ index 3ae1f2e..dd3fe36 100644
          <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
          <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 diff --git a/QuickLook/ViewWindowManager.cs b/QuickLook/ViewWindowManager.cs
-index 56b6c5e..a00772b 100644
+index 56b6c5e..dcf3ff0 100644
 --- a/QuickLook/ViewWindowManager.cs
 +++ b/QuickLook/ViewWindowManager.cs
-@@ -21,6 +21,7 @@ using QuickLook.Helpers;
+@@ -19,8 +19,10 @@ using QuickLook.Common.Helpers;
+ using QuickLook.Common.Plugin;
+ using QuickLook.Helpers;
  using System;
++using System.Collections.Generic;
  using System.Diagnostics;
  using System.IO;
 +using System.Linq;
  using System.Runtime.ExceptionServices;
  
  namespace QuickLook;
-@@ -106,20 +107,64 @@ public class ViewWindowManager : IDisposable
+@@ -106,20 +108,82 @@ public class ViewWindowManager : IDisposable
          InitNewViewerWindow();
      }
  
@@ -214,10 +214,14 @@ index 56b6c5e..a00772b 100644
          if (string.IsNullOrEmpty(path))
              path = NativeMethods.QuickLook.GetCurrentSelection();
  
-+        // macOS-like fallback: when the focus is on the preview window itself
-+        // (no Explorer selection is available), navigate within the current folder.
-+        if (string.IsNullOrEmpty(path) && direction != 0 && !string.IsNullOrEmpty(_invokedPath))
++        // Arrow-key navigation: when the Explorer selection is unavailable OR hasn't changed
++        // (focus/hover is on the preview window, or Explorer already selects the same file),
++        // move to the adjacent image in the current folder (macOS-like).
++        if (direction != 0 && !string.IsNullOrEmpty(_invokedPath) &&
++            (string.IsNullOrEmpty(path) || string.Equals(path, _invokedPath, StringComparison.OrdinalIgnoreCase)))
++        {
 +            path = GetAdjacentFile(_invokedPath, direction);
++        }
 +
          if (string.IsNullOrEmpty(path))
              return;
@@ -225,6 +229,19 @@ index 56b6c5e..a00772b 100644
          InvokePreview(path);
      }
  
++    private static readonly HashSet<string> _imageExtensions = new(StringComparer.OrdinalIgnoreCase)
++    {
++        ".apng", ".ari", ".arw", ".avif", ".ani", ".bay", ".bmp", ".cap", ".cr2", ".cr3", ".crw",
++        ".cur", ".dcr", ".dcs", ".dds", ".dng", ".drf", ".dcm", ".dicom", ".eip", ".emf", ".erf",
++        ".exr", ".fff", ".gif", ".hdr", ".heic", ".heif", ".ico", ".icon", ".icns", ".iiq",
++        ".jfif", ".jp2", ".jpeg", ".jpg", ".jxl", ".j2k", ".jpf", ".jpx", ".jpm", ".jxr",
++        ".k25", ".kdc", ".mdc", ".mef", ".mos", ".mrw", ".mj2", ".miff", ".nef", ".nrw",
++        ".obm", ".orf", ".pbm", ".pcx", ".pef", ".pgm", ".png", ".pnm", ".ppm", ".psb", ".psd",
++        ".ptx", ".pxn", ".qoi", ".r3d", ".raf", ".raw", ".rw2", ".rwl", ".rwz", ".sr2", ".srf",
++        ".srw", ".svg", ".svgz", ".tga", ".tif", ".tiff", ".wdp", ".webp", ".wmf", ".x3f", ".xcf",
++        ".xbm", ".xpm",
++    };
++
 +    private string GetAdjacentFile(string currentPath, int direction)
 +    {
 +        try
@@ -246,6 +263,7 @@ index 56b6c5e..a00772b 100644
 +                        return false;
 +                    }
 +                })
++                .Where(f => _imageExtensions.Contains(Path.GetExtension(f)))
 +                .OrderBy(f => f, StringComparer.CurrentCultureIgnoreCase)
 +                .ToList();
 +
