@@ -35,7 +35,7 @@ index 0000000..37dd581
 +[assembly: AssemblyFileVersion("4.5.0.0")]
 +[assembly: AssemblyInformationalVersion("4.5.0+modified")]
 diff --git a/QuickLook/KeystrokeDispatcher.cs b/QuickLook/KeystrokeDispatcher.cs
-index e9db56c..ae6557a 100644
+index e9db56c..726eba2 100644
 --- a/QuickLook/KeystrokeDispatcher.cs
 +++ b/QuickLook/KeystrokeDispatcher.cs
 @@ -20,6 +20,7 @@ using QuickLook.Helpers;
@@ -70,7 +70,7 @@ index e9db56c..ae6557a 100644
 +            {
 +                _arrowKeySuppressed = true;
 +                e.Handled = true;
-+                SendSwitchWithDirection(e.KeyCode);
++                SendSwitchWithDirection(e.KeyCode, true);
 +                return;
 +            }
 +        }
@@ -93,25 +93,23 @@ index e9db56c..ae6557a 100644
          } // else (when isKeyDown is false), _isPreviewRequest retain its current state
  
          // call InvokeRoutine only when user pressed a key in a valid window, or
-@@ -146,10 +173,15 @@ internal class KeystrokeDispatcher : IDisposable
+@@ -146,10 +173,13 @@ internal class KeystrokeDispatcher : IDisposable
              switch (key)
              {
                  case Keys.Up:
 -                case Keys.Down:
                  case Keys.Left:
-+                    // direction = previous (macOS-like navigation)
-+                    PipeServerManager.SendMessage(PipeMessages.Switch, null, new[] { "-1" });
-+                    break;
-+
 +                case Keys.Down:
                  case Keys.Right:
 -                    PipeServerManager.SendMessage(PipeMessages.Switch);
-+                    // direction = next (macOS-like navigation)
-+                    PipeServerManager.SendMessage(PipeMessages.Switch, null, new[] { "1" });
++                    // If focus or mouse is on the preview window itself, navigate within
++                    // the folder (self); otherwise follow the Explorer selection.
++                    var isSelf = WindowHelper.IsForegroundWindowBelongToSelf() || IsMouseOverOwnWindow();
++                    SendSwitchWithDirection(key, isSelf);
                      break;
  
                  case Keys.Escape:
-@@ -171,6 +203,46 @@ internal class KeystrokeDispatcher : IDisposable
+@@ -171,6 +201,46 @@ internal class KeystrokeDispatcher : IDisposable
          _hook.KeyUp += upHandler;
      }
  
@@ -120,10 +118,10 @@ index e9db56c..ae6557a 100644
 +        return key is Keys.Up or Keys.Down or Keys.Left or Keys.Right;
 +    }
 +
-+    private static void SendSwitchWithDirection(Keys key)
++    private static void SendSwitchWithDirection(Keys key, bool isSelf)
 +    {
 +        var direction = key is Keys.Left or Keys.Up ? "-1" : "1";
-+        PipeServerManager.SendMessage(PipeMessages.Switch, null, new[] { direction });
++        PipeServerManager.SendMessage(PipeMessages.Switch, null, isSelf ? new[] { direction, "self" } : new[] { direction });
 +    }
 +
 +    private static bool IsMouseOverOwnWindow()
@@ -159,16 +157,20 @@ index e9db56c..ae6557a 100644
      {
          return _instance ??= new KeystrokeDispatcher();
 diff --git a/QuickLook/PipeServerManager.cs b/QuickLook/PipeServerManager.cs
-index 92a3b35..803a3e6 100644
+index 92a3b35..1fb1085 100644
 --- a/QuickLook/PipeServerManager.cs
 +++ b/QuickLook/PipeServerManager.cs
-@@ -140,7 +140,8 @@ public class PipeServerManager : IDisposable
+@@ -139,8 +139,12 @@ public class PipeServerManager : IDisposable
+                 return false;
  
              case PipeMessages.Switch:
++                var parsedDirection = 0;
++                if (!string.IsNullOrEmpty(option) &&
++                    int.TryParse(option.Split(',')[0], out var parsedDir))
++                    parsedDirection = parsedDir;
                  _lastOperation = Application.Current.Dispatcher.BeginInvoke(
 -                    new Action(() => ViewWindowManager.GetInstance().SwitchPreview(path)),
-+                    new Action(() => ViewWindowManager.GetInstance().SwitchPreview(path,
-+                        int.TryParse(option, out var direction) ? direction : 0)),
++                    new Action(() => ViewWindowManager.GetInstance().SwitchPreview(path, parsedDirection, option)),
                      DispatcherPriority.ApplicationIdle);
                  return false;
  
@@ -186,7 +188,7 @@ index 3ae1f2e..dd3fe36 100644
          <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
          <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 diff --git a/QuickLook/ViewWindowManager.cs b/QuickLook/ViewWindowManager.cs
-index 56b6c5e..dcf3ff0 100644
+index 56b6c5e..33659e1 100644
 --- a/QuickLook/ViewWindowManager.cs
 +++ b/QuickLook/ViewWindowManager.cs
 @@ -19,8 +19,10 @@ using QuickLook.Common.Helpers;
@@ -200,32 +202,44 @@ index 56b6c5e..dcf3ff0 100644
  using System.Runtime.ExceptionServices;
  
  namespace QuickLook;
-@@ -106,20 +108,82 @@ public class ViewWindowManager : IDisposable
+@@ -106,13 +108,33 @@ public class ViewWindowManager : IDisposable
          InitNewViewerWindow();
      }
  
 -    public void SwitchPreview(string path = null)
-+    public void SwitchPreview(string path = null, int direction = 0)
++    public void SwitchPreview(string path = null, int direction = 0, string options = null)
      {
          if (!_viewerWindow.IsVisible)
              return;
  
-+        // Normal path: the foreground window is Explorer/Desktop, read the current selection.
-         if (string.IsNullOrEmpty(path))
-             path = NativeMethods.QuickLook.GetCurrentSelection();
- 
-+        // Arrow-key navigation: when the Explorer selection is unavailable OR hasn't changed
-+        // (focus/hover is on the preview window, or Explorer already selects the same file),
-+        // move to the adjacent image in the current folder (macOS-like).
-+        if (direction != 0 && !string.IsNullOrEmpty(_invokedPath) &&
-+            (string.IsNullOrEmpty(path) || string.Equals(path, _invokedPath, StringComparison.OrdinalIgnoreCase)))
-+        {
-+            path = GetAdjacentFile(_invokedPath, direction);
-+        }
+-        if (string.IsNullOrEmpty(path))
+-            path = NativeMethods.QuickLook.GetCurrentSelection();
++        // Focus/hover is on the preview window itself: navigate within the folder,
++        // ignoring whatever the background Explorer happens to have selected.
++        var selfNav = direction != 0 && options?.Split(',').Contains("self") == true;
 +
++        if (selfNav)
++        {
++            if (!string.IsNullOrEmpty(_invokedPath))
++                path = GetAdjacentFile(_invokedPath, direction);
++        }
++        else
++        {
++            // Normal path: the foreground window is Explorer/Desktop, read the current selection.
++            if (string.IsNullOrEmpty(path))
++                path = NativeMethods.QuickLook.GetCurrentSelection();
++
++            // Arrow-key navigation fallback: Explorer selection unavailable or unchanged.
++            if (direction != 0 && !string.IsNullOrEmpty(_invokedPath) &&
++                (string.IsNullOrEmpty(path) || string.Equals(path, _invokedPath, StringComparison.OrdinalIgnoreCase)))
++            {
++                path = GetAdjacentFile(_invokedPath, direction);
++            }
++        }
+ 
          if (string.IsNullOrEmpty(path))
              return;
- 
+@@ -120,6 +142,58 @@ public class ViewWindowManager : IDisposable
          InvokePreview(path);
      }
  
